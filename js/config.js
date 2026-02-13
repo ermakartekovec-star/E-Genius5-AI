@@ -9,7 +9,7 @@ const CONFIG = {
         CLIENT_SECRET: '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',
         
         // ВАШ API KEY
-        API_KEY: 'AIzaSyBgVIVDENwnPIDuN43WDYG2OjmD5e32ZDY',
+        API_KEY: 'AIzaSyBgVlVDEnwnPlDuN43WDYG2OjmD5e32ZDY',
         
         // Права доступа
         SCOPES: ['https://www.googleapis.com/auth/drive'],
