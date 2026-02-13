@@ -13,8 +13,8 @@ class GoogleDriveManager {
             await this.loadGapi();
             await this.loadGis();
             
-            // ✅ ПРОВЕРЯЕМ СОХРАНЁННЫЙ ТОКЕН
-            const hasToken = this.checkSavedToken();
+            // Пытаемся восстановить токен
+            await this.restoreToken();
             
             await this.findOrCreateFolder();
             this.isInitialized = true;
@@ -28,7 +28,7 @@ class GoogleDriveManager {
         }
     }
 
-    // Обновление статуса на странице
+    // Обновление статуса
     updateDriveStatus(connected) {
         const statusEl = document.getElementById('driveStatus');
         if (!statusEl) return;
@@ -103,83 +103,77 @@ class GoogleDriveManager {
                     this.accessToken = response.access_token;
                     gapi.client.setToken({ access_token: response.access_token });
                     
-                    // ✅ СОХРАНЯЕМ ТОКЕН
-                    localStorage.setItem('gdrive_token', JSON.stringify({
+                    // Сохраняем токен с временем жизни
+                    const tokenData = {
                         token: response.access_token,
                         expires_in: response.expires_in || 3600,
                         timestamp: Date.now()
-                    }));
+                    };
+                    localStorage.setItem('gdrive_token', JSON.stringify(tokenData));
                     
-                    console.log('✅ Токен сохранён');
+                    console.log('✅ Токен сохранён, истекает через:', tokenData.expires_in, 'секунд');
                 }
             },
         });
     }
 
-    // ✅ ПРОВЕРКА СОХРАНЁННОГО ТОКЕНА
-    checkSavedToken() {
+    // Восстановление токена
+    async restoreToken() {
         const saved = localStorage.getItem('gdrive_token');
-        if (saved) {
-            try {
-                const tokenData = JSON.parse(saved);
-                // Проверяем, не истёк ли токен (обычно живёт 1 час = 3600 секунд)
-                const expiresIn = tokenData.expires_in * 1000;
-                const age = Date.now() - tokenData.timestamp;
-                
-                if (age < expiresIn) {
-                    gapi.client.setToken({ access_token: tokenData.token });
-                    console.log('✅ Используем сохранённый токен');
-                    return true;
-                } else {
-                    console.log('⏰ Токен истёк, нужно обновить');
-                    localStorage.removeItem('gdrive_token');
-                }
-            } catch (e) {
-                console.error('Ошибка загрузки токена', e);
+        if (!saved) return false;
+        
+        try {
+            const tokenData = JSON.parse(saved);
+            const age = (Date.now() - tokenData.timestamp) / 1000;
+            
+            if (age < tokenData.expires_in) {
+                gapi.client.setToken({ access_token: tokenData.token });
+                console.log('✅ Токен восстановлен, возраст:', Math.round(age), 'сек');
+                return true;
+            } else {
+                console.log('⏰ Токен истёк, возраст:', Math.round(age), 'сек');
                 localStorage.removeItem('gdrive_token');
+                return false;
             }
+        } catch (e) {
+            console.error('❌ Ошибка восстановления токена:', e);
+            localStorage.removeItem('gdrive_token');
+            return false;
         }
-        return false;
     }
 
     // Запрос токена
-    requestAccessToken() {
+    async requestAccessToken(force = false) {
+        if (!force) {
+            const restored = await this.restoreToken();
+            if (restored) return true;
+        }
+        
         return new Promise((resolve, reject) => {
-            // Проверяем, может уже есть сохранённый токен
-            if (this.checkSavedToken()) {
-                resolve({ access_token: JSON.parse(localStorage.getItem('gdrive_token')).token });
-                return;
-            }
-            
             this.tokenClient.callback = (response) => {
                 if (response.error) {
                     reject(response);
                 } else {
                     gapi.client.setToken({ access_token: response.access_token });
                     
-                    // ✅ СОХРАНЯЕМ ТОКЕН
-                    localStorage.setItem('gdrive_token', JSON.stringify({
+                    const tokenData = {
                         token: response.access_token,
                         expires_in: response.expires_in || 3600,
                         timestamp: Date.now()
-                    }));
+                    };
+                    localStorage.setItem('gdrive_token', JSON.stringify(tokenData));
                     
                     resolve(response);
                 }
             };
             
-            // Запрашиваем токен без prompt, если есть сохранённая сессия
-            this.tokenClient.requestAccessToken({ prompt: '' });
+            this.tokenClient.requestAccessToken({ prompt: force ? 'consent' : '' });
         });
     }
 
-    // Поиск папки по имени
+    // Поиск папки
     async findFolderByName(folderName) {
         try {
-            if (!gapi.client.getToken()) {
-                await this.requestAccessToken();
-            }
-            
             const response = await gapi.client.drive.files.list({
                 q: `name='${folderName}' and mimeType='application/vnd.google-apps.folder' and trashed=false`,
                 fields: 'files(id, name)',
@@ -196,10 +190,6 @@ class GoogleDriveManager {
     // Создание папки
     async createFolder(folderName) {
         try {
-            if (!gapi.client.getToken()) {
-                await this.requestAccessToken();
-            }
-            
             const response = await gapi.client.drive.files.create({
                 resource: {
                     name: folderName,
@@ -218,23 +208,21 @@ class GoogleDriveManager {
     // Поиск или создание папки
     async findOrCreateFolder() {
         try {
-            // Если нет токена - проверяем сохранённый или запрашиваем
             if (!gapi.client.getToken()) {
-                const hasToken = this.checkSavedToken();
-                if (!hasToken) {
-                    await this.requestAccessToken();
-                }
+                await this.requestAccessToken();
             }
             
             const folder = await this.findFolderByName('E-Genius5 AI');
             
             if (folder) {
                 this.folderId = folder.id;
+                console.log('📁 Найдена папка:', folder.id);
                 return folder.id;
             }
             
             const newFolder = await this.createFolder('E-Genius5 AI');
             this.folderId = newFolder.id;
+            console.log('📁 Создана папка:', newFolder.id);
             return newFolder.id;
         } catch (error) {
             console.error('Ошибка:', error);
@@ -246,7 +234,6 @@ class GoogleDriveManager {
     async loadJSONFile(fileName) {
         try {
             if (!this.folderId) await this.findOrCreateFolder();
-            if (!gapi.client.getToken()) await this.requestAccessToken();
             
             const response = await gapi.client.drive.files.list({
                 q: `name='${fileName}' and '${this.folderId}' in parents and trashed=false`,
@@ -272,7 +259,6 @@ class GoogleDriveManager {
     async saveJSONFile(fileName, data) {
         try {
             if (!this.folderId) await this.findOrCreateFolder();
-            if (!gapi.client.getToken()) await this.requestAccessToken();
             
             const searchResponse = await gapi.client.drive.files.list({
                 q: `name='${fileName}' and '${this.folderId}' in parents and trashed=false`,
@@ -292,40 +278,26 @@ class GoogleDriveManager {
             form.append('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }));
             form.append('file', blob);
             
-            const accessToken = gapi.client.getToken().access_token;
+            const token = gapi.client.getToken().access_token;
             
             if (existingFiles.length) {
                 await fetch(`https://www.googleapis.com/upload/drive/v3/files/${existingFiles[0].id}?uploadType=multipart`, {
                     method: 'PATCH',
-                    headers: { 'Authorization': `Bearer ${accessToken}` },
+                    headers: { 'Authorization': `Bearer ${token}` },
                     body: form
                 });
             } else {
                 await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart', {
                     method: 'POST',
-                    headers: { 'Authorization': `Bearer ${accessToken}` },
+                    headers: { 'Authorization': `Bearer ${token}` },
                     body: form
                 });
             }
+            
+            console.log(`✅ Файл ${fileName} сохранён`);
         } catch (error) {
             console.error(`Ошибка сохранения ${fileName}:`, error);
             throw error;
-        }
-    }
-
-    // Проверка существования файла
-    async fileExists(fileName) {
-        try {
-            if (!this.folderId) await this.findOrCreateFolder();
-            
-            const response = await gapi.client.drive.files.list({
-                q: `name='${fileName}' and '${this.folderId}' in parents and trashed=false`,
-                fields: 'files(id)'
-            });
-            
-            return response.result.files.length > 0;
-        } catch (error) {
-            return false;
         }
     }
 }
@@ -334,13 +306,11 @@ class GoogleDriveManager {
 const driveManager = new GoogleDriveManager();
 let currentRole = null;
 
-// Константы сессии
 const SESSION_KEY = 'egenius_session';
 
-// Проверка сессии при загрузке
+// Проверка сессии
 async function checkSession() {
     const sessionData = localStorage.getItem(SESSION_KEY);
-    
     if (!sessionData) return null;
     
     try {
@@ -356,7 +326,7 @@ async function checkSession() {
     }
 }
 
-// Показать модальное окно ввода пароля
+// Показать модальное окно
 function showPasswordModal(role) {
     currentRole = role;
     document.getElementById('modalTitle').textContent = 
@@ -436,7 +406,6 @@ async function handleLogin() {
             await createDefaultConfig();
             config = await driveManager.loadJSONFile('config.json');
             
-            // Если только что создали конфиг - паролей ещё нет
             if (!config.passwords.deputy || !config.passwords.staff) {
                 showError('Сначала заполните config.json в Google Drive!');
                 hideLoading();
@@ -444,7 +413,6 @@ async function handleLogin() {
             }
         }
         
-        // Проверяем, заполнены ли пароли
         if (!config.passwords || !config.passwords.deputy || !config.passwords.staff) {
             showError('Пароли не заполнены в config.json на Google Drive');
             hideLoading();
@@ -465,7 +433,6 @@ async function handleLogin() {
             
             localStorage.setItem(SESSION_KEY, JSON.stringify(session));
             
-            // Плавный переход
             document.body.style.opacity = '0';
             setTimeout(() => {
                 window.location.href = 'chat.html';
@@ -483,19 +450,16 @@ async function handleLogin() {
 
 // Инициализация при загрузке страницы
 document.addEventListener('DOMContentLoaded', async () => {
-    // Показываем статус подключения
     setTimeout(async () => {
         await driveManager.initialize();
     }, 1000);
     
-    // Если мы на chat.html, проверяем сессию
     if (window.location.pathname.includes('chat.html')) {
         const role = await checkSession();
         if (!role) {
             window.location.href = 'index.html';
         } else {
             currentRole = role;
-            // Функция инициализации чата будет вызвана из chat.js
             if (window.initializeChat) {
                 window.initializeChat(role);
             }
